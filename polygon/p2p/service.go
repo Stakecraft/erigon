@@ -104,6 +104,10 @@ func (s *Service) ListPeersMayHaveBlockNum(blockNum uint64) []*p2p.PeerId {
 	return s.peerTracker.ListPeersMayHaveBlockNum(blockNum)
 }
 
+func (s *Service) ListPeers() []*p2p.PeerId {
+	return s.peerTracker.ListPeers()
+}
+
 func (s *Service) FetchHeaders(ctx context.Context, start, end uint64, peerId *p2p.PeerId, opts ...p2p.FetcherOption) (p2p.FetcherResponse[[]*types.Header], error) {
 	return s.fetcher.FetchHeaders(ctx, start, end, peerId, opts...)
 }

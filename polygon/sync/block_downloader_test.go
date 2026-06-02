@@ -760,3 +760,34 @@ func TestBlockDownloaderDownloadBlocksRespectsBlockLimit(t *testing.T) {
 		})
 	}
 }
+
+func TestBlockDownloaderDownloadBlocksSkipsBlocksBehindStart(t *testing.T) {
+	test := newBlockDownloaderTest(t)
+	test.waypointReader.EXPECT().
+		CheckpointsFromBlock(gomock.Any(), gomock.Eq(uint64(500))).
+		Return(test.fakeCheckpoints(1), nil).
+		Times(1)
+	test.p2pService.EXPECT().
+		ListPeersMayHaveBlockNum(gomock.Eq(uint64(500))).
+		Return(test.fakePeers(1)).
+		Times(1)
+	test.p2pService.EXPECT().
+		FetchHeaders(gomock.Any(), gomock.Eq(uint64(1)), gomock.Eq(uint64(1024)), gomock.Any()).
+		DoAndReturn(test.defaultFetchHeadersMock()).
+		Times(1)
+	test.p2pService.EXPECT().
+		FetchBodies(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(test.defaultFetchBodiesMock()).
+		Times(1)
+	var insertedBlocks []*types.Block
+	test.store.EXPECT().
+		InsertBlocks(gomock.Any(), gomock.Any()).
+		DoAndReturn(test.defaultInsertBlocksMock(&insertedBlocks)).
+		Times(1)
+
+	_, err := test.blockDownloader.DownloadBlocksUsingCheckpoints(context.Background(), 500, nil)
+	require.NoError(t, err)
+	require.Len(t, insertedBlocks, 524)
+	require.Equal(t, uint64(500), insertedBlocks[0].NumberU64())
+	require.Equal(t, uint64(1023), insertedBlocks[len(insertedBlocks)-1].NumberU64())
+}

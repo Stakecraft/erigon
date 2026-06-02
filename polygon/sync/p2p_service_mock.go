@@ -214,6 +214,44 @@ func (c *Mockp2pServiceListPeersMayHaveBlockNumCall) DoAndReturn(f func(uint64) 
 	return c
 }
 
+// ListPeers mocks base method.
+func (m *Mockp2pService) ListPeers() []*p2p.PeerId {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListPeers")
+	ret0, _ := ret[0].([]*p2p.PeerId)
+	return ret0
+}
+
+// ListPeers indicates an expected call of ListPeers.
+func (mr *Mockp2pServiceMockRecorder) ListPeers() *Mockp2pServiceListPeersCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListPeers", reflect.TypeOf((*Mockp2pService)(nil).ListPeers))
+	return &Mockp2pServiceListPeersCall{Call: call}
+}
+
+// Mockp2pServiceListPeersCall wrap *gomock.Call
+type Mockp2pServiceListPeersCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *Mockp2pServiceListPeersCall) Return(arg0 []*p2p.PeerId) *Mockp2pServiceListPeersCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *Mockp2pServiceListPeersCall) Do(f func() []*p2p.PeerId) *Mockp2pServiceListPeersCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *Mockp2pServiceListPeersCall) DoAndReturn(f func() []*p2p.PeerId) *Mockp2pServiceListPeersCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // MaxPeers mocks base method.
 func (m *Mockp2pService) MaxPeers() int {
 	m.ctrl.T.Helper()

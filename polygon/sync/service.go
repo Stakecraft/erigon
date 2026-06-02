@@ -74,6 +74,7 @@ func NewService(
 		blocksVerifier,
 		store,
 		blockLimit,
+		WithLocalHeaderReader(execution),
 	)
 	ccBuilderFactory := NewCanonicalChainBuilderFactory(chainConfig, borConfig, heimdallService, signaturesCache, logger)
 	events := NewTipEvents(logger, p2pService, heimdallService, minedBlockReg)
