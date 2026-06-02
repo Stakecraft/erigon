@@ -1093,6 +1093,8 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 			p2pConfig.MaxPeers,
 			statusDataProvider,
 			executionRpc,
+			backend.chainDB,
+			backend.blockReader,
 			config.LoopBlockLimit,
 			polygonBridge,
 			heimdallService,

@@ -29,12 +29,14 @@ import (
 	"github.com/erigontech/erigon-lib/gointerfaces/sentryproto"
 	"github.com/erigontech/erigon-lib/log/v3"
 	"github.com/erigontech/erigon/eth/ethconfig"
+	"github.com/erigontech/erigon/db/kv"
 	"github.com/erigontech/erigon/execution/chain"
 	"github.com/erigontech/erigon/p2p/sentry"
 	"github.com/erigontech/erigon/polygon/bor/borcfg"
 	"github.com/erigontech/erigon/polygon/bridge"
 	"github.com/erigontech/erigon/polygon/heimdall"
 	polygonp2p "github.com/erigontech/erigon/polygon/p2p"
+	"github.com/erigontech/erigon/turbo/services"
 	"github.com/erigontech/erigon/turbo/shards"
 )
 
@@ -46,6 +48,8 @@ func NewService(
 	maxPeers int,
 	statusDataProvider *sentry.StatusDataProvider,
 	executionClient executionproto.ExecutionClient,
+	chainDB kv.TemporalRwDB,
+	blockReader services.FullBlockReader,
 	blockLimit uint,
 	bridgeService *bridge.Service,
 	heimdallService *heimdall.Service,
@@ -74,7 +78,7 @@ func NewService(
 		blocksVerifier,
 		store,
 		blockLimit,
-		WithLocalChainReader(execution),
+		WithLocalChainReader(newDBLocalChainReader(chainDB, blockReader)),
 	)
 	ccBuilderFactory := NewCanonicalChainBuilderFactory(chainConfig, borConfig, heimdallService, signaturesCache, logger)
 	events := NewTipEvents(logger, p2pService, heimdallService, minedBlockReg)
