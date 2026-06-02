@@ -568,6 +568,8 @@ func (d *BlockDownloader) fetchTailBodiesPreferLocal(
 		syncLogPrefix("fetching waypoint tail bodies from peer"),
 		"localBodies", localBodies,
 		"peerBodies", len(peerHeaders),
+		"firstBlock", peerHeaders[0].Number.Uint64(),
+		"lastBlock", peerHeaders[len(peerHeaders)-1].Number.Uint64(),
 		"batchSize", waypointBodyFetchBatchSize,
 	)
 

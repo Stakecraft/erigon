@@ -178,6 +178,14 @@ func (e *EthereumExecutionModule) getBody(ctx context.Context, tx kv.Tx, blockHa
 		body, _, _ := rawdb.ReadBody(tx, blockHash, blockNumber)
 		return body, nil
 	}
+	// Match eth_getBlockByNumber: BlockWithSenders resolves snapshot blocks by height.
+	block, _, err := e.blockReader.BlockWithSenders(ctx, tx, blockHash, blockNumber)
+	if err != nil {
+		return nil, err
+	}
+	if block != nil {
+		return block.Body(), nil
+	}
 	return e.blockReader.BodyWithTransactions(ctx, tx, blockHash, blockNumber)
 }
 
