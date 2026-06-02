@@ -58,6 +58,7 @@ const (
 
 type localChainReader interface {
 	GetHeader(ctx context.Context, blockNum uint64) (*types.Header, error)
+	GetCanonicalHeader(ctx context.Context, blockNum uint64) (*types.Header, error)
 	GetBody(ctx context.Context, blockNum uint64, blockHash common.Hash) (*types.Body, error)
 	GetBodyByNumber(ctx context.Context, blockNum uint64) (*types.Body, error)
 }
@@ -540,6 +541,7 @@ func (d *BlockDownloader) logLocalTailBlockProbe(ctx context.Context, blockNum u
 	}
 
 	header, hErr := d.localChainReader.GetHeader(ctx, blockNum)
+	canonicalHeader, _ := d.localChainReader.GetCanonicalHeader(ctx, blockNum)
 	bodyByHash, bhErr := d.localChainReader.GetBody(ctx, blockNum, blockHash)
 	bodyByNum, bnErr := d.localChainReader.GetBodyByNumber(ctx, blockNum)
 
@@ -553,10 +555,12 @@ func (d *BlockDownloader) logLocalTailBlockProbe(ctx context.Context, blockNum u
 	}
 
 	localHeaderHash := common.Hash{}
-	if header != nil {
+	if canonicalHeader != nil {
+		localHeaderHash = canonicalHeader.Hash()
+	} else if header != nil {
 		localHeaderHash = header.Hash()
 	}
-	forkMismatch := header != nil && localHeaderHash != blockHash
+	forkMismatch := localHeaderHash != (common.Hash{}) && localHeaderHash != blockHash
 
 	if forkMismatch {
 		d.logger.Warn(
@@ -640,7 +644,8 @@ func (d *BlockDownloader) fetchTailBodiesPreferLocal(
 		d.logLocalTailBlockProbe(ctx, peerHeaders[0].Number.Uint64(), peerHeaders[0].Hash())
 	}
 
-	peerCandidates := d.listConnectedPeerCandidates(nil)
+	firstBlockNum := peerHeaders[0].Number.Uint64()
+	peerCandidates := d.listConnectedPeerCandidates(firstBlockNum, nil)
 	d.logger.Info(
 		syncLogPrefix("fetching waypoint tail bodies from peer"),
 		"localBodies", localBodies,
@@ -688,7 +693,8 @@ func (d *BlockDownloader) fetchPeerBodiesInBatches(
 				}
 			}
 
-			peerCandidates := d.listConnectedPeerCandidates(primaryPeer)
+			blockNum := batchHeaders[0].Number.Uint64()
+			peerCandidates := d.listConnectedPeerCandidates(blockNum, primaryPeer)
 			if len(peerCandidates) == 0 {
 				lastErr = p2p.ErrPeerNotFound
 				continue
@@ -743,8 +749,8 @@ func (d *BlockDownloader) fetchPeerBodiesInBatches(
 	return totalSize, nil
 }
 
-func (d *BlockDownloader) listConnectedPeerCandidates(primaryPeer *p2p.PeerId) []*p2p.PeerId {
-	connected := d.p2pService.ListPeers()
+func (d *BlockDownloader) listConnectedPeerCandidates(blockNum uint64, primaryPeer *p2p.PeerId) []*p2p.PeerId {
+	connected := d.p2pService.ListFetchPeers(blockNum)
 	out := make([]*p2p.PeerId, 0, len(connected))
 	var primary *p2p.PeerId
 

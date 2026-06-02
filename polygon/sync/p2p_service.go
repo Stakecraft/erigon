@@ -31,6 +31,7 @@ type p2pService interface {
 	MaxPeers() int
 	ListPeersMayHaveBlockNum(blockNum uint64) []*p2p.PeerId
 	ListPeers() []*p2p.PeerId
+	ListFetchPeers(blockNum uint64) []*p2p.PeerId
 	FetchHeaders(ctx context.Context, start, end uint64, peerId *p2p.PeerId, opts ...p2p.FetcherOption) (p2p.FetcherResponse[[]*types.Header], error)
 	FetchBodies(ctx context.Context, headers []*types.Header, peerId *p2p.PeerId, opts ...p2p.FetcherOption) (p2p.FetcherResponse[[]*types.Body], error)
 	FetchBlocksBackwards(ctx context.Context, h common.Hash, hr p2p.BbdHeaderReader, opts ...p2p.BbdOption) (p2p.BbdResultFeed, error)

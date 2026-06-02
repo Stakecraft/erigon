@@ -129,6 +129,22 @@ func (r *dbLocalChainReader) GetBodyByNumber(ctx context.Context, blockNum uint6
 	return block.Body(), nil
 }
 
+func (r *dbLocalChainReader) GetCanonicalHeader(ctx context.Context, blockNum uint64) (*types.Header, error) {
+	tx, err := r.db.BeginRo(r.localReadCtx(ctx))
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	readCtx := r.localReadCtx(ctx)
+	canonical, ok, err := r.br.CanonicalHash(readCtx, tx, blockNum)
+	if err != nil || !ok || canonical == (common.Hash{}) {
+		return nil, err
+	}
+
+	return r.br.Header(readCtx, tx, canonical, blockNum)
+}
+
 func (r *dbLocalChainReader) GetBody(ctx context.Context, blockNum uint64, blockHash common.Hash) (*types.Body, error) {
 	tx, err := r.db.BeginRo(r.localReadCtx(ctx))
 	if err != nil {

@@ -22,6 +22,7 @@ import (
 	"math/big"
 
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/erigontech/erigon-lib/common"
 	"github.com/erigontech/erigon-lib/event"
@@ -53,6 +54,7 @@ func NewService(logger log.Logger, maxPeers int, sc sentryproto.SentryClient, sd
 		publisher:       publisher,
 		bbd:             bbd,
 		maxPeers:        maxPeers,
+		sentryClient:    sc,
 	}
 }
 
@@ -65,6 +67,7 @@ type Service struct {
 	publisher       *Publisher
 	bbd             *p2p.BackwardBlockDownloader
 	maxPeers        int
+	sentryClient    sentryproto.SentryClient
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -106,6 +109,45 @@ func (s *Service) ListPeersMayHaveBlockNum(blockNum uint64) []*p2p.PeerId {
 
 func (s *Service) ListPeers() []*p2p.PeerId {
 	return s.peerTracker.ListPeers()
+}
+
+// ListFetchPeers returns peers that are both tracked and connected in sentry.
+func (s *Service) ListFetchPeers(blockNum uint64) []*p2p.PeerId {
+	candidates := s.peerTracker.ListPeersMayHaveBlockNum(blockNum)
+	if len(candidates) == 0 {
+		candidates = s.peerTracker.ListPeers()
+	}
+
+	return s.filterPeersKnownToSentry(candidates)
+}
+
+func (s *Service) filterPeersKnownToSentry(peers []*p2p.PeerId) []*p2p.PeerId {
+	reply, err := s.sentryClient.Peers(context.Background(), &emptypb.Empty{})
+	if err != nil || reply == nil || len(reply.Peers) == 0 {
+		return peers
+	}
+
+	known := make(map[string]struct{}, len(reply.Peers))
+	for _, peer := range reply.Peers {
+		known[peer.Id] = struct{}{}
+	}
+
+	out := make([]*p2p.PeerId, 0, len(peers))
+	for _, peerId := range peers {
+		if _, ok := known[peerId.String()]; ok {
+			out = append(out, peerId)
+		}
+	}
+
+	if len(out) == 0 && len(peers) > 0 {
+		s.logger.Warn(
+			"[p2p] tracker peers are not connected in sentry",
+			"tracked", len(peers),
+			"sentry", len(reply.Peers),
+		)
+	}
+
+	return out
 }
 
 func (s *Service) FetchHeaders(ctx context.Context, start, end uint64, peerId *p2p.PeerId, opts ...p2p.FetcherOption) (p2p.FetcherResponse[[]*types.Header], error) {
