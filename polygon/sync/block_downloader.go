@@ -518,6 +518,51 @@ func waypointFetchOpts(headerCount int) []p2p.FetcherOption {
 	}
 }
 
+func (d *BlockDownloader) loadLocalTailBody(ctx context.Context, blockNum uint64, blockHash common.Hash) (*types.Body, error) {
+	if d.localChainReader == nil {
+		return nil, nil
+	}
+
+	// Checkpoint headers are verified; try that hash first (chaindata body keys).
+	body, err := d.localChainReader.GetBody(ctx, blockNum, blockHash)
+	if err != nil || body != nil {
+		return body, err
+	}
+
+	return d.localChainReader.GetBodyByNumber(ctx, blockNum)
+}
+
+func (d *BlockDownloader) logLocalTailBlockProbe(ctx context.Context, blockNum uint64, blockHash common.Hash) {
+	if d.localChainReader == nil {
+		return
+	}
+
+	header, hErr := d.localChainReader.GetHeader(ctx, blockNum)
+	bodyByHash, bhErr := d.localChainReader.GetBody(ctx, blockNum, blockHash)
+	bodyByNum, bnErr := d.localChainReader.GetBodyByNumber(ctx, blockNum)
+
+	txByHash := 0
+	if bodyByHash != nil {
+		txByHash = len(bodyByHash.Transactions)
+	}
+	txByNum := 0
+	if bodyByNum != nil {
+		txByNum = len(bodyByNum.Transactions)
+	}
+
+	d.logger.Info(
+		syncLogPrefix("local tail block probe"),
+		"block", blockNum,
+		"hash", blockHash,
+		"headerFound", header != nil,
+		"headerErr", hErr,
+		"bodyByHashTxs", txByHash,
+		"bodyByHashErr", bhErr,
+		"bodyByNumTxs", txByNum,
+		"bodyByNumErr", bnErr,
+	)
+}
+
 func tailBodyFetchOpts(headerCount int) []p2p.FetcherOption {
 	timeout := tailBodyFetchBaseTimeout + time.Duration(headerCount)*tailBodyFetchPerHeaderTimeout
 	if timeout > tailBodyFetchMaxTimeout {
@@ -544,10 +589,7 @@ func (d *BlockDownloader) fetchTailBodiesPreferLocal(
 	for i, header := range tailHeaders {
 		if d.localChainReader != nil {
 			blockNum := header.Number.Uint64()
-			body, err := d.localChainReader.GetBodyByNumber(ctx, blockNum)
-			if err == nil && body == nil {
-				body, err = d.localChainReader.GetBody(ctx, blockNum, header.Hash())
-			}
+			body, err := d.loadLocalTailBody(ctx, blockNum, header.Hash())
 			if err == nil && body != nil {
 				bodies[i] = body
 				localBodies++
@@ -565,6 +607,10 @@ func (d *BlockDownloader) fetchTailBodiesPreferLocal(
 			"blocks", localBodies,
 		)
 		return bodies, 0, nil
+	}
+
+	if localBodies == 0 && len(peerHeaders) > 0 {
+		d.logLocalTailBlockProbe(ctx, peerHeaders[0].Number.Uint64(), peerHeaders[0].Hash())
 	}
 
 	d.logger.Info(
@@ -726,10 +772,7 @@ func (d *BlockDownloader) tryFetchVerifiedCheckpointTailFromLocal(
 			continue
 		}
 
-		body, err := d.localChainReader.GetBodyByNumber(ctx, blockNum)
-		if err == nil && body == nil {
-			body, err = d.localChainReader.GetBody(ctx, blockNum, header.Hash())
-		}
+		body, err := d.loadLocalTailBody(ctx, blockNum, header.Hash())
 		if err != nil || body == nil {
 			d.logger.Debug(
 				syncLogPrefix("checkpoint not fully available locally"),
