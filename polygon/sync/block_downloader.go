@@ -141,6 +141,18 @@ func (d *BlockDownloader) DownloadBlocksUsingMilestones(ctx context.Context, sta
 	}
 
 	if firstMilestoneStart := milestones[0].StartBlock().Uint64(); start < firstMilestoneStart {
+		gap := firstMilestoneStart - start
+		if gap > maxMilestoneStartOverrideGap {
+			d.logger.Warn(
+				syncLogPrefix("gap before first milestone is too large to override start, use checkpoint sync"),
+				"start", start,
+				"firstMilestoneStart", firstMilestoneStart,
+				"gap", gap,
+				"maxGap", maxMilestoneStartOverrideGap,
+			)
+			return nil, nil
+		}
+
 		// Note this can happen (rarely, but it has happened) on initial sync if there is
 		// a gap between the last downloaded checkpoint EndBlock and the StartBlock of the oldest
 		// milestone that we have scrapped. We fill the gap by overriding the StartBlock of the milestone.
@@ -150,7 +162,7 @@ func (d *BlockDownloader) DownloadBlocksUsingMilestones(ctx context.Context, sta
 			syncLogPrefix("gap between start and first milestone, overriding milestone start"),
 			"start", start,
 			"firstMilestoneStart", firstMilestoneStart,
-			"gap", firstMilestoneStart-start,
+			"gap", gap,
 		)
 
 		milestones[0].Fields.StartBlock = new(big.Int).SetUint64(start)
