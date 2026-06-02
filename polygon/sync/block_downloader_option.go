@@ -32,10 +32,10 @@ func WithMaxWorkers(maxWorkers int) BlockDownloaderOption {
 	}
 }
 
-// WithLocalHeaderReader enables loading already-synced checkpoint prefix headers from
-// the local chain on restart instead of re-downloading them from peers.
-func WithLocalHeaderReader(reader localHeaderReader) BlockDownloaderOption {
+// WithLocalChainReader enables loading already-synced checkpoint data from the local
+// chain on restart instead of re-downloading it from peers.
+func WithLocalChainReader(reader localChainReader) BlockDownloaderOption {
 	return func(downloader *BlockDownloader) {
-		downloader.localHeaderReader = reader
+		downloader.localChainReader = reader
 	}
 }

@@ -169,6 +169,37 @@ func (e *executionClient) GetHeader(ctx context.Context, blockNum uint64) (*type
 	return header, nil
 }
 
+func (e *executionClient) GetBody(ctx context.Context, blockNum uint64, blockHash common.Hash) (*types.Body, error) {
+	response, err := e.client.GetBody(ctx, &executionproto.GetSegmentRequest{
+		BlockNumber: &blockNum,
+		BlockHash:   gointerfaces.ConvertHashToH256(blockHash),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	bodyRpc := response.GetBody()
+	if bodyRpc == nil {
+		return nil, nil
+	}
+
+	rawBody, err := eth1utils.ConvertRawBlockBodyFromRpc(bodyRpc)
+	if err != nil {
+		return nil, err
+	}
+
+	txs, err := types.DecodeTransactions(rawBody.Transactions)
+	if err != nil {
+		return nil, err
+	}
+
+	return &types.Body{
+		Transactions: txs,
+		Uncles:       nil,
+		Withdrawals:  rawBody.Withdrawals,
+	}, nil
+}
+
 func (e *executionClient) GetTd(ctx context.Context, blockNum uint64, blockHash common.Hash) (*big.Int, error) {
 	response, err := e.client.GetTD(ctx, &executionproto.GetSegmentRequest{
 		BlockNumber: &blockNum,

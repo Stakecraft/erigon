@@ -45,8 +45,9 @@ const (
 	blockDownloaderEstimatedRamPerWorker = estimate.EstimatedRamPerWorker(1 * datasize.GB)
 )
 
-type localHeaderReader interface {
+type localChainReader interface {
 	GetHeader(ctx context.Context, blockNum uint64) (*types.Header, error)
+	GetBody(ctx context.Context, blockNum uint64, blockHash common.Hash) (*types.Body, error)
 }
 
 func NewBlockDownloader(
@@ -88,7 +89,7 @@ type BlockDownloader struct {
 	milestoneVerifier  WaypointHeadersVerifier
 	blocksVerifier     BlocksVerifier
 	store              Store
-	localHeaderReader  localHeaderReader
+	localChainReader   localChainReader
 	retryBackOff       time.Duration
 	maxWorkers         int
 	blockLimit         uint
@@ -301,7 +302,7 @@ func (d *BlockDownloader) downloadBlocksUsingWaypoints(
 
 				blocks, totalSize, err := d.fetchVerifiedBlocks(ctx, waypoint, peerId, verifier, start)
 				if err != nil {
-					d.logger.Debug(
+					d.logger.Warn(
 						syncLogPrefix("issue downloading waypoint blocks - will try again"),
 						"err", err,
 						"start", waypoint.StartBlock(),
@@ -413,7 +414,16 @@ func (d *BlockDownloader) fetchVerifiedBlocks(
 	downloadStart uint64,
 ) ([]*types.Block, int, error) {
 	waypointStart := waypoint.StartBlock().Uint64()
-	end := waypoint.EndBlock().Uint64() + 1 // waypoint end is inclusive, fetch headers is [start, end)
+	waypointEnd := waypoint.EndBlock().Uint64()
+	end := waypointEnd + 1 // waypoint end is inclusive, fetch headers is [start, end)
+
+	if downloadStart > waypointStart && d.localChainReader != nil {
+		if blocks, totalSize, ok := d.tryFetchVerifiedCheckpointTailFromLocal(
+			ctx, waypoint, downloadStart, verifier,
+		); ok {
+			return blocks, totalSize, nil
+		}
+	}
 
 	prefixHeaders, fetchStart := d.loadLocalCheckpointPrefix(ctx, waypointStart, downloadStart)
 
@@ -427,7 +437,7 @@ func (d *BlockDownloader) fetchVerifiedBlocks(
 
 	// 2. Verify headers match waypoint root hash
 	if err = verifier(waypoint, allHeaders); err != nil {
-		d.logger.Debug(syncLogPrefix("penalizing peer - invalid headers"), "peerId", peerId, "err", err)
+		d.logger.Warn(syncLogPrefix("penalizing peer - invalid headers"), "peerId", peerId, "err", err)
 
 		if penalizeErr := d.p2pService.Penalize(ctx, peerId); penalizeErr != nil {
 			err = fmt.Errorf("%w: %w", penalizeErr, err)
@@ -436,11 +446,12 @@ func (d *BlockDownloader) fetchVerifiedBlocks(
 		return nil, 0, err
 	}
 
-	// 3. Fetch bodies for the verified waypoint headers
-	bodies, err := d.p2pService.FetchBodies(ctx, allHeaders, peerId)
+	// 3. Fetch bodies only for headers received from the peer (not for the local prefix).
+	tailHeaders := headers.Data
+	bodies, err := d.p2pService.FetchBodies(ctx, tailHeaders, peerId)
 	if err != nil {
 		if errors.Is(err, &p2p.ErrMissingBodies{}) {
-			d.logger.Debug(syncLogPrefix("penalizing peer - missing bodies"), "peerId", peerId, "err", err)
+			d.logger.Warn(syncLogPrefix("penalizing peer - missing bodies"), "peerId", peerId, "err", err)
 
 			if penalizeErr := d.p2pService.Penalize(ctx, peerId); penalizeErr != nil {
 				err = fmt.Errorf("%w: %w", penalizeErr, err)
@@ -450,15 +461,15 @@ func (d *BlockDownloader) fetchVerifiedBlocks(
 		return nil, 0, err
 	}
 
-	// 4. Assemble blocks
-	blocks := make([]*types.Block, len(allHeaders))
-	for i, header := range allHeaders {
+	// 4. Assemble blocks (tail only; prefix blocks are already on the local chain)
+	blocks := make([]*types.Block, len(tailHeaders))
+	for i, header := range tailHeaders {
 		blocks[i] = types.NewBlockFromNetwork(header, bodies.Data[i])
 	}
 
 	// 5. Verify blocks
 	if err = d.blocksVerifier(blocks); err != nil {
-		d.logger.Debug(syncLogPrefix("penalizing peer - invalid blocks"), "peerId", peerId, "err", err)
+		d.logger.Warn(syncLogPrefix("penalizing peer - invalid blocks"), "peerId", peerId, "err", err)
 
 		if penalizeErr := d.p2pService.Penalize(ctx, peerId); penalizeErr != nil {
 			err = fmt.Errorf("%w: %w", penalizeErr, err)
@@ -470,27 +481,101 @@ func (d *BlockDownloader) fetchVerifiedBlocks(
 	return blocks, headers.TotalSize + bodies.TotalSize, nil
 }
 
+func (d *BlockDownloader) tryFetchVerifiedCheckpointTailFromLocal(
+	ctx context.Context,
+	waypoint heimdall.Waypoint,
+	downloadStart uint64,
+	verifier WaypointHeadersVerifier,
+) ([]*types.Block, int, bool) {
+	waypointStart := waypoint.StartBlock().Uint64()
+	waypointEnd := waypoint.EndBlock().Uint64()
+
+	allHeaders, ok := d.loadLocalCheckpointHeaders(ctx, waypointStart, waypointEnd)
+	if !ok {
+		return nil, 0, false
+	}
+
+	if err := verifier(waypoint, allHeaders); err != nil {
+		return nil, 0, false
+	}
+
+	blocks := make([]*types.Block, 0, waypointEnd-downloadStart+1)
+	for _, header := range allHeaders {
+		blockNum := header.Number.Uint64()
+		if blockNum < downloadStart {
+			continue
+		}
+
+		body, err := d.localChainReader.GetBody(ctx, blockNum, header.Hash())
+		if err != nil || body == nil {
+			return nil, 0, false
+		}
+
+		blocks = append(blocks, types.NewBlockFromNetwork(header, body))
+	}
+
+	if err := d.blocksVerifier(blocks); err != nil {
+		return nil, 0, false
+	}
+
+	d.logger.Info(
+		syncLogPrefix("checkpoint tail fetched from local chain"),
+		"waypointStart", waypointStart,
+		"waypointEnd", waypointEnd,
+		"downloadStart", downloadStart,
+		"blocks", len(blocks),
+	)
+
+	return blocks, 0, true
+}
+
+func (d *BlockDownloader) loadLocalCheckpointHeaders(
+	ctx context.Context,
+	waypointStart uint64,
+	waypointEnd uint64,
+) ([]*types.Header, bool) {
+	headers := make([]*types.Header, 0, waypointEnd-waypointStart+1)
+	for blockNum := waypointStart; blockNum <= waypointEnd; blockNum++ {
+		header, err := d.localChainReader.GetHeader(ctx, blockNum)
+		if err != nil || header == nil {
+			return nil, false
+		}
+
+		headers = append(headers, header)
+	}
+
+	return headers, true
+}
+
 func (d *BlockDownloader) loadLocalCheckpointPrefix(
 	ctx context.Context,
 	waypointStart uint64,
 	downloadStart uint64,
 ) ([]*types.Header, uint64) {
-	if downloadStart <= waypointStart || d.localHeaderReader == nil {
+	if downloadStart <= waypointStart || d.localChainReader == nil {
 		return nil, waypointStart
 	}
 
 	prefixLen := downloadStart - waypointStart
 	prefixHeaders := make([]*types.Header, 0, prefixLen)
 	for blockNum := waypointStart; blockNum < downloadStart; blockNum++ {
-		header, err := d.localHeaderReader.GetHeader(ctx, blockNum)
+		header, err := d.localChainReader.GetHeader(ctx, blockNum)
 		if err != nil || header == nil {
+			d.logger.Warn(
+				syncLogPrefix("incomplete local checkpoint prefix, will fetch full range from peer"),
+				"waypointStart", waypointStart,
+				"downloadStart", downloadStart,
+				"missingBlock", blockNum,
+				"err", err,
+			)
+
 			return nil, waypointStart
 		}
 
 		prefixHeaders = append(prefixHeaders, header)
 	}
 
-	d.logger.Debug(
+	d.logger.Info(
 		syncLogPrefix("using local headers for checkpoint prefix"),
 		"waypointStart", waypointStart,
 		"downloadStart", downloadStart,
