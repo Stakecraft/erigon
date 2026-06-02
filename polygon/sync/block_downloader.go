@@ -44,6 +44,7 @@ const (
 	maxWaypointFetchTimeout       = 5 * time.Minute
 	perHeaderFetchTimeout         = 500 * time.Millisecond
 	waypointBodyFetchMaxRetries   = 5
+	waypointBodyFetchBatchSize    = 32
 
 	// conservative over-estimation: 1 MB block size x 1024 blocks per waypoint
 	blockDownloaderEstimatedRamPerWorker = estimate.EstimatedRamPerWorker(1 * datasize.GB)
@@ -546,25 +547,85 @@ func (d *BlockDownloader) fetchTailBodiesPreferLocal(
 	}
 
 	d.logger.Info(
-		syncLogPrefix("fetching checkpoint tail bodies from peer"),
+		syncLogPrefix("fetching waypoint tail bodies from peer"),
 		"localBodies", localBodies,
 		"peerBodies", len(peerHeaders),
+		"batchSize", waypointBodyFetchBatchSize,
 	)
 
-	peerResp, err := d.p2pService.FetchBodies(ctx, peerHeaders, peerId, fetchOpts...)
+	totalSize, err := d.fetchPeerBodiesInBatches(ctx, peerHeaders, peerIndices, bodies, peerId, fetchOpts)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	if len(peerResp.Data) != len(peerHeaders) {
-		return nil, 0, fmt.Errorf("peer returned %d bodies, expected %d", len(peerResp.Data), len(peerHeaders))
+	return bodies, totalSize, nil
+}
+
+func (d *BlockDownloader) fetchPeerBodiesInBatches(
+	ctx context.Context,
+	peerHeaders []*types.Header,
+	peerIndices []int,
+	bodies []*types.Body,
+	primaryPeer *p2p.PeerId,
+	_ []p2p.FetcherOption,
+) (int, error) {
+	peerCandidates := make([]*p2p.PeerId, 0, 1+len(d.p2pService.ListPeers()))
+	if primaryPeer != nil {
+		peerCandidates = append(peerCandidates, primaryPeer)
+	}
+	for _, peer := range d.p2pService.ListPeers() {
+		if peer == nil {
+			continue
+		}
+		if primaryPeer != nil && *peer == *primaryPeer {
+			continue
+		}
+		peerCandidates = append(peerCandidates, peer)
 	}
 
-	for j, idx := range peerIndices {
-		bodies[idx] = peerResp.Data[j]
+	var totalSize int
+	for offset := 0; offset < len(peerHeaders); {
+		batchEnd := offset + waypointBodyFetchBatchSize
+		if batchEnd > len(peerHeaders) {
+			batchEnd = len(peerHeaders)
+		}
+
+		batchHeaders := peerHeaders[offset:batchEnd]
+		batchIndices := peerIndices[offset:batchEnd]
+		batchOpts := waypointFetchOpts(len(batchHeaders))
+
+		var lastErr error
+		fetched := false
+		for _, peerId := range peerCandidates {
+			peerResp, err := d.p2pService.FetchBodies(ctx, batchHeaders, peerId, batchOpts...)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if len(peerResp.Data) != len(batchHeaders) {
+				lastErr = fmt.Errorf("peer returned %d bodies, expected %d", len(peerResp.Data), len(batchHeaders))
+				continue
+			}
+
+			for j, idx := range batchIndices {
+				bodies[idx] = peerResp.Data[j]
+			}
+
+			totalSize += peerResp.TotalSize
+			offset = batchEnd
+			fetched = true
+			break
+		}
+
+		if !fetched {
+			if lastErr == nil {
+				lastErr = p2p.ErrPeerNotFound
+			}
+			return 0, lastErr
+		}
 	}
 
-	return bodies, peerResp.TotalSize, nil
+	return totalSize, nil
 }
 
 func (d *BlockDownloader) tryFetchVerifiedCheckpointTailFromLocal(
