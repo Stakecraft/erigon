@@ -51,6 +51,8 @@ const heimdallSyncRetryIntervalOnStartup = 30 * time.Second
 const minPeersBeforeWaypointSync = 3
 const waitForPeersTimeout = 90 * time.Second
 const waitForPeersPollInterval = 1 * time.Second
+// when resuming inside a checkpoint with at most this many blocks left, milestone sync is used instead
+const maxCheckpointTailForMilestoneHandoff = 4096
 
 var (
 	futureMilestoneDelay  = 1 * time.Second // amount of time to wait before putting a future milestone back in the event queue
@@ -64,6 +66,7 @@ type heimdallSynchronizer interface {
 	SynchronizeCheckpoints(ctx context.Context) (latest *heimdall.Checkpoint, ok bool, err error)
 	SynchronizeMilestones(ctx context.Context) (latest *heimdall.Milestone, ok bool, err error)
 	SynchronizeSpans(ctx context.Context, blockNum uint64) error
+	CheckpointsFromBlock(ctx context.Context, startBlock uint64) ([]*heimdall.Checkpoint, error)
 	WaitUntilHeimdallIsSynced(ctx context.Context, retryInterval time.Duration) error
 	Ready(ctx context.Context) <-chan error
 }
@@ -1088,10 +1091,56 @@ func (s *Sync) waitForPeers(ctx context.Context) error {
 }
 
 func (s *Sync) syncToTipUsingCheckpoints(ctx context.Context, tip *types.Header) (syncToTipResult, bool, error) {
+	downloadStart := tip.Number.Uint64() + 1
+	skip, err := s.shouldSkipCheckpointSyncForNearTipResume(ctx, downloadStart)
+	if err != nil {
+		return syncToTipResult{}, false, err
+	}
+	if skip {
+		s.logger.Info(
+			syncLogPrefix("near tip inside open checkpoint, skipping checkpoint sync in favour of milestones"),
+			"downloadStart", downloadStart,
+		)
+		return syncToTipResult{latestTip: tip}, false, nil
+	}
+
 	syncCheckpoints := func(ctx context.Context) (heimdall.Waypoint, bool, error) {
 		return s.heimdallSync.SynchronizeCheckpoints(ctx)
 	}
 	return s.sync(ctx, tip, syncCheckpoints, s.blockDownloader.DownloadBlocksUsingCheckpoints)
+}
+
+func (s *Sync) shouldSkipCheckpointSyncForNearTipResume(ctx context.Context, downloadStart uint64) (bool, error) {
+	checkpoints, err := s.heimdallSync.CheckpointsFromBlock(ctx, downloadStart)
+	if err != nil {
+		return false, err
+	}
+	if len(checkpoints) == 0 {
+		return false, nil
+	}
+
+	first := checkpoints[0]
+	start := first.StartBlock().Uint64()
+	end := first.EndBlock().Uint64()
+	if downloadStart <= start || downloadStart > end {
+		return false, nil
+	}
+
+	tailLen := end - downloadStart + 1
+	if tailLen > maxCheckpointTailForMilestoneHandoff {
+		return false, nil
+	}
+
+	s.logger.Info(
+		syncLogPrefix("checkpoint tail is small, will hand off to milestone sync"),
+		"checkpointId", first.Id,
+		"checkpointStart", start,
+		"checkpointEnd", end,
+		"downloadStart", downloadStart,
+		"tailLen", tailLen,
+	)
+
+	return true, nil
 }
 
 func (s *Sync) syncToTipUsingMilestones(ctx context.Context, tip *types.Header) (syncToTipResult, bool, error) {
