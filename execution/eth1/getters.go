@@ -57,11 +57,37 @@ func (e *EthereumExecutionModule) parseSegmentRequest(ctx context.Context, tx kv
 			err = errNotFound
 			return
 		}
+		if blockHash == (common.Hash{}) {
+			blockHash, err = e.headerHashForNumber(ctx, tx, blockNumber)
+			if err != nil {
+				return
+			}
+		}
 	case req.BlockHash != nil && req.BlockNumber != nil:
 		blockHash = gointerfaces.ConvertH256ToHash(req.BlockHash)
 		blockNumber = *req.BlockNumber
 	}
 	return
+}
+
+func (e *EthereumExecutionModule) headerHashForNumber(ctx context.Context, tx kv.Tx, blockNumber uint64) (common.Hash, error) {
+	if e.blockReader == nil {
+		return common.Hash{}, errNotFound
+	}
+	header, err := e.blockReader.HeaderByNumber(ctx, tx, blockNumber)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	if header == nil {
+		header, err = e.blockReader.Header(ctx, tx, common.Hash{}, blockNumber)
+		if err != nil {
+			return common.Hash{}, err
+		}
+	}
+	if header == nil {
+		return common.Hash{}, errNotFound
+	}
+	return header.Hash(), nil
 }
 
 func (e *EthereumExecutionModule) GetBody(ctx context.Context, req *executionproto.GetSegmentRequest) (*executionproto.GetBodyResponse, error) {
@@ -85,6 +111,15 @@ func (e *EthereumExecutionModule) GetBody(ctx context.Context, req *executionpro
 	body, err := e.getBody(ctx, tx, blockHash, blockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("ethereumExecutionModule.GetBody: getBody error %w", err)
+	}
+	if body == nil && req.BlockNumber != nil && e.blockReader != nil {
+		localHash, herr := e.headerHashForNumber(ctx, tx, *req.BlockNumber)
+		if herr == nil && localHash != blockHash {
+			body, err = e.getBody(ctx, tx, localHash, blockNumber)
+			if err != nil {
+				return nil, fmt.Errorf("ethereumExecutionModule.GetBody: getBody error %w", err)
+			}
+		}
 	}
 	if body == nil {
 		return &executionproto.GetBodyResponse{Body: nil}, nil

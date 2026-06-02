@@ -545,9 +545,6 @@ func (d *BlockDownloader) fetchTailBodiesPreferLocal(
 		if d.localChainReader != nil {
 			blockNum := header.Number.Uint64()
 			body, err := d.localChainReader.GetBodyByNumber(ctx, blockNum)
-			if err == nil && body == nil {
-				body, err = d.localChainReader.GetBody(ctx, blockNum, header.Hash())
-			}
 			if err == nil && body != nil {
 				bodies[i] = body
 				localBodies++
@@ -677,16 +674,34 @@ func (d *BlockDownloader) tryFetchVerifiedCheckpointTailFromLocal(
 	waypointStart := waypoint.StartBlock().Uint64()
 	waypointEnd := waypoint.EndBlock().Uint64()
 
-	allHeaders, ok := d.loadLocalCheckpointHeaders(ctx, waypointStart, waypointEnd)
+	var allHeaders []*types.Header
+	if downloadStart > waypointStart {
+		prefixHeaders, fetchStart := d.loadLocalCheckpointPrefix(ctx, waypointStart, downloadStart)
+		if fetchStart != downloadStart {
+			d.logger.Debug(
+				syncLogPrefix("checkpoint not fully available locally"),
+				"waypointStart", waypointStart,
+				"waypointEnd", waypointEnd,
+				"downloadStart", downloadStart,
+				"reason", "missing prefix headers",
+			)
+			return nil, 0, false
+		}
+		allHeaders = prefixHeaders
+	}
+
+	tailHeaders, ok := d.loadLocalCheckpointTail(ctx, downloadStart, waypointEnd)
 	if !ok {
 		d.logger.Debug(
 			syncLogPrefix("checkpoint not fully available locally"),
 			"waypointStart", waypointStart,
 			"waypointEnd", waypointEnd,
-			"reason", "missing headers",
+			"downloadStart", downloadStart,
+			"reason", "missing tail headers",
 		)
 		return nil, 0, false
 	}
+	allHeaders = append(allHeaders, tailHeaders...)
 
 	if err := verifier(waypoint, allHeaders); err != nil {
 		d.logger.Debug(
@@ -707,9 +722,6 @@ func (d *BlockDownloader) tryFetchVerifiedCheckpointTailFromLocal(
 		}
 
 		body, err := d.localChainReader.GetBodyByNumber(ctx, blockNum)
-		if err == nil && body == nil {
-			body, err = d.localChainReader.GetBody(ctx, blockNum, header.Hash())
-		}
 		if err != nil || body == nil {
 			d.logger.Debug(
 				syncLogPrefix("checkpoint not fully available locally"),
@@ -741,13 +753,17 @@ func (d *BlockDownloader) tryFetchVerifiedCheckpointTailFromLocal(
 	return blocks, 0, true
 }
 
-func (d *BlockDownloader) loadLocalCheckpointHeaders(
+func (d *BlockDownloader) loadLocalCheckpointTail(
 	ctx context.Context,
-	waypointStart uint64,
+	downloadStart uint64,
 	waypointEnd uint64,
 ) ([]*types.Header, bool) {
-	headers := make([]*types.Header, 0, waypointEnd-waypointStart+1)
-	for blockNum := waypointStart; blockNum <= waypointEnd; blockNum++ {
+	if d.localChainReader == nil {
+		return nil, false
+	}
+
+	headers := make([]*types.Header, 0, waypointEnd-downloadStart+1)
+	for blockNum := downloadStart; blockNum <= waypointEnd; blockNum++ {
 		header, err := d.localChainReader.GetHeader(ctx, blockNum)
 		if err != nil || header == nil {
 			return nil, false
