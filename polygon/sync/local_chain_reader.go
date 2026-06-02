@@ -37,51 +37,87 @@ func newDBLocalChainReader(db kv.TemporalRwDB, br services.FullBlockReader) *dbL
 	return &dbLocalChainReader{db: db, br: br}
 }
 
+// local reads must not use a cancelled waypoint-download context.
+func (r *dbLocalChainReader) localReadCtx(context.Context) context.Context {
+	return context.Background()
+}
+
 func (r *dbLocalChainReader) readBlock(ctx context.Context, blockNum uint64) (*types.Block, error) {
-	tx, err := r.db.BeginRo(ctx)
+	tx, err := r.db.BeginRo(r.localReadCtx(ctx))
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 
+	readCtx := r.localReadCtx(ctx)
+
 	n, h, _, err := rpchelper.GetBlockNumber(
-		ctx,
+		readCtx,
 		rpc.BlockNumberOrHashWithNumber(rpc.BlockNumber(blockNum)),
 		tx,
 		r.br,
 		nil,
 	)
-	if err != nil {
-		return nil, err
+	if err == nil {
+		block, _, berr := r.br.BlockWithSenders(readCtx, tx, h, n)
+		if berr != nil {
+			return nil, berr
+		}
+		if block != nil {
+			return block, nil
+		}
 	}
 
-	block, _, err := r.br.BlockWithSenders(ctx, tx, h, n)
-	if err != nil {
-		return nil, err
+	header, herr := r.br.Header(readCtx, tx, common.Hash{}, blockNum)
+	if herr == nil && header != nil {
+		block, _, berr := r.br.BlockWithSenders(readCtx, tx, header.Hash(), blockNum)
+		if berr != nil {
+			return nil, berr
+		}
+		if block != nil {
+			return block, nil
+		}
 	}
 
-	return block, nil
+	header, herr = r.br.HeaderByNumber(readCtx, tx, blockNum)
+	if herr == nil && header != nil {
+		block, _, berr := r.br.BlockWithSenders(readCtx, tx, header.Hash(), blockNum)
+		if berr != nil {
+			return nil, berr
+		}
+		if block != nil {
+			return block, nil
+		}
+	}
+
+	return nil, nil
 }
 
 func (r *dbLocalChainReader) GetHeader(ctx context.Context, blockNum uint64) (*types.Header, error) {
-	tx, err := r.db.BeginRo(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
+	block, err := r.readBlock(ctx, blockNum)
+	if err != nil || block == nil {
+		tx, err := r.db.BeginRo(r.localReadCtx(ctx))
+		if err != nil {
+			return nil, err
+		}
+		defer tx.Rollback()
 
-	n, h, _, err := rpchelper.GetBlockNumber(
-		ctx,
-		rpc.BlockNumberOrHashWithNumber(rpc.BlockNumber(blockNum)),
-		tx,
-		r.br,
-		nil,
-	)
-	if err != nil {
-		return nil, err
+		readCtx := r.localReadCtx(ctx)
+		n, h, _, err := rpchelper.GetBlockNumber(
+			readCtx,
+			rpc.BlockNumberOrHashWithNumber(rpc.BlockNumber(blockNum)),
+			tx,
+			r.br,
+			nil,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		return r.br.Header(readCtx, tx, h, n)
 	}
 
-	return r.br.Header(ctx, tx, h, n)
+	return block.Header(), nil
 }
 
 func (r *dbLocalChainReader) GetBodyByNumber(ctx context.Context, blockNum uint64) (*types.Body, error) {
@@ -93,6 +129,18 @@ func (r *dbLocalChainReader) GetBodyByNumber(ctx context.Context, blockNum uint6
 	return block.Body(), nil
 }
 
-func (r *dbLocalChainReader) GetBody(ctx context.Context, blockNum uint64, _ common.Hash) (*types.Body, error) {
-	return r.GetBodyByNumber(ctx, blockNum)
+func (r *dbLocalChainReader) GetBody(ctx context.Context, blockNum uint64, blockHash common.Hash) (*types.Body, error) {
+	tx, err := r.db.BeginRo(r.localReadCtx(ctx))
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	readCtx := r.localReadCtx(ctx)
+	block, _, err := r.br.BlockWithSenders(readCtx, tx, blockHash, blockNum)
+	if err != nil || block == nil {
+		return r.GetBodyByNumber(ctx, blockNum)
+	}
+
+	return block.Body(), nil
 }

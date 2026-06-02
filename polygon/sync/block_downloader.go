@@ -545,6 +545,9 @@ func (d *BlockDownloader) fetchTailBodiesPreferLocal(
 		if d.localChainReader != nil {
 			blockNum := header.Number.Uint64()
 			body, err := d.localChainReader.GetBodyByNumber(ctx, blockNum)
+			if err == nil && body == nil {
+				body, err = d.localChainReader.GetBody(ctx, blockNum, header.Hash())
+			}
 			if err == nil && body != nil {
 				bodies[i] = body
 				localBodies++
@@ -724,6 +727,9 @@ func (d *BlockDownloader) tryFetchVerifiedCheckpointTailFromLocal(
 		}
 
 		body, err := d.localChainReader.GetBodyByNumber(ctx, blockNum)
+		if err == nil && body == nil {
+			body, err = d.localChainReader.GetBody(ctx, blockNum, header.Hash())
+		}
 		if err != nil || body == nil {
 			d.logger.Debug(
 				syncLogPrefix("checkpoint not fully available locally"),
