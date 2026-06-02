@@ -48,6 +48,9 @@ const maxBlockBatchDownloadSize = 256
 
 const heimdallSyncRetryIntervalOnTip = 200 * time.Millisecond
 const heimdallSyncRetryIntervalOnStartup = 30 * time.Second
+const minPeersBeforeWaypointSync = 3
+const waitForPeersTimeout = 90 * time.Second
+const waitForPeersPollInterval = 1 * time.Second
 
 var (
 	futureMilestoneDelay  = 1 * time.Second // amount of time to wait before putting a future milestone back in the event queue
@@ -861,6 +864,10 @@ func (s *Sync) Run(ctx context.Context) error {
 		return err
 	}
 
+	if err := s.waitForPeers(ctx); err != nil {
+		return err
+	}
+
 	s.logger.Info(syncLogPrefix("running sync component"))
 	result, err := s.syncToTip(ctx)
 	if err != nil {
@@ -1047,6 +1054,37 @@ func (s *Sync) syncToTip(ctx context.Context) (syncToTipResult, error) {
 	}
 
 	return finalisedTip, nil
+}
+
+func (s *Sync) waitForPeers(ctx context.Context) error {
+	deadline := time.Now().Add(waitForPeersTimeout)
+	for {
+		peerCount := len(s.p2pService.ListPeers())
+		if peerCount >= minPeersBeforeWaypointSync {
+			s.logger.Info(syncLogPrefix("p2p peers ready for sync"), "peerCount", peerCount)
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			s.logger.Warn(
+				syncLogPrefix("proceeding with fewer peers than desired"),
+				"peerCount", peerCount,
+				"minPeers", minPeersBeforeWaypointSync,
+				"waited", waitForPeersTimeout,
+			)
+			return nil
+		}
+
+		s.logger.Info(
+			syncLogPrefix("waiting for p2p peers before waypoint sync"),
+			"peerCount", peerCount,
+			"minPeers", minPeersBeforeWaypointSync,
+		)
+
+		if err := common.Sleep(ctx, waitForPeersPollInterval); err != nil {
+			return err
+		}
+	}
 }
 
 func (s *Sync) syncToTipUsingCheckpoints(ctx context.Context, tip *types.Header) (syncToTipResult, bool, error) {

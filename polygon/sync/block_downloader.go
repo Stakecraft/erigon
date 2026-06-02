@@ -40,6 +40,10 @@ import (
 
 const (
 	notEnoughPeersBackOffDuration = time.Minute
+	minWaypointFetchTimeout       = 60 * time.Second
+	maxWaypointFetchTimeout       = 5 * time.Minute
+	perHeaderFetchTimeout         = 500 * time.Millisecond
+	waypointBodyFetchMaxRetries   = 5
 
 	// conservative over-estimation: 1 MB block size x 1024 blocks per waypoint
 	blockDownloaderEstimatedRamPerWorker = estimate.EstimatedRamPerWorker(1 * datasize.GB)
@@ -427,8 +431,11 @@ func (d *BlockDownloader) fetchVerifiedBlocks(
 
 	prefixHeaders, fetchStart := d.loadLocalCheckpointPrefix(ctx, waypointStart, downloadStart)
 
+	tailHeaderCount := int(end - fetchStart)
+	fetchOpts := waypointFetchOpts(tailHeaderCount)
+
 	// 1. Fetch headers in waypoint from a peer
-	headers, err := d.p2pService.FetchHeaders(ctx, fetchStart, end, peerId)
+	headers, err := d.p2pService.FetchHeaders(ctx, fetchStart, end, peerId, fetchOpts...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -446,9 +453,9 @@ func (d *BlockDownloader) fetchVerifiedBlocks(
 		return nil, 0, err
 	}
 
-	// 3. Fetch bodies only for headers received from the peer (not for the local prefix).
+	// 3. Fetch bodies for the tail; prefer bodies already present in the local chain.
 	tailHeaders := headers.Data
-	bodies, err := d.p2pService.FetchBodies(ctx, tailHeaders, peerId)
+	bodies, bodiesSize, err := d.fetchTailBodiesPreferLocal(ctx, tailHeaders, peerId, fetchOpts)
 	if err != nil {
 		if errors.Is(err, &p2p.ErrMissingBodies{}) {
 			d.logger.Warn(syncLogPrefix("penalizing peer - missing bodies"), "peerId", peerId, "err", err)
@@ -464,7 +471,7 @@ func (d *BlockDownloader) fetchVerifiedBlocks(
 	// 4. Assemble blocks (tail only; prefix blocks are already on the local chain)
 	blocks := make([]*types.Block, len(tailHeaders))
 	for i, header := range tailHeaders {
-		blocks[i] = types.NewBlockFromNetwork(header, bodies.Data[i])
+		blocks[i] = types.NewBlockFromNetwork(header, bodies[i])
 	}
 
 	// 5. Verify blocks
@@ -478,7 +485,74 @@ func (d *BlockDownloader) fetchVerifiedBlocks(
 		return nil, 0, err
 	}
 
-	return blocks, headers.TotalSize + bodies.TotalSize, nil
+	return blocks, headers.TotalSize + bodiesSize, nil
+}
+
+func waypointFetchOpts(headerCount int) []p2p.FetcherOption {
+	timeout := minWaypointFetchTimeout + time.Duration(headerCount)*perHeaderFetchTimeout
+	if timeout > maxWaypointFetchTimeout {
+		timeout = maxWaypointFetchTimeout
+	}
+
+	return []p2p.FetcherOption{
+		p2p.WithResponseTimeout(timeout),
+		p2p.WithMaxRetries(waypointBodyFetchMaxRetries),
+	}
+}
+
+func (d *BlockDownloader) fetchTailBodiesPreferLocal(
+	ctx context.Context,
+	tailHeaders []*types.Header,
+	peerId *p2p.PeerId,
+	fetchOpts []p2p.FetcherOption,
+) ([]*types.Body, int, error) {
+	bodies := make([]*types.Body, len(tailHeaders))
+	peerHeaders := make([]*types.Header, 0, len(tailHeaders))
+	peerIndices := make([]int, 0, len(tailHeaders))
+	localBodies := 0
+
+	for i, header := range tailHeaders {
+		if d.localChainReader != nil {
+			body, err := d.localChainReader.GetBody(ctx, header.Number.Uint64(), header.Hash())
+			if err == nil && body != nil {
+				bodies[i] = body
+				localBodies++
+				continue
+			}
+		}
+
+		peerHeaders = append(peerHeaders, header)
+		peerIndices = append(peerIndices, i)
+	}
+
+	if len(peerHeaders) == 0 {
+		d.logger.Info(
+			syncLogPrefix("checkpoint tail bodies loaded from local chain"),
+			"blocks", localBodies,
+		)
+		return bodies, 0, nil
+	}
+
+	d.logger.Info(
+		syncLogPrefix("fetching checkpoint tail bodies from peer"),
+		"localBodies", localBodies,
+		"peerBodies", len(peerHeaders),
+	)
+
+	peerResp, err := d.p2pService.FetchBodies(ctx, peerHeaders, peerId, fetchOpts...)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if len(peerResp.Data) != len(peerHeaders) {
+		return nil, 0, fmt.Errorf("peer returned %d bodies, expected %d", len(peerResp.Data), len(peerHeaders))
+	}
+
+	for j, idx := range peerIndices {
+		bodies[idx] = peerResp.Data[j]
+	}
+
+	return bodies, peerResp.TotalSize, nil
 }
 
 func (d *BlockDownloader) tryFetchVerifiedCheckpointTailFromLocal(
@@ -492,10 +566,23 @@ func (d *BlockDownloader) tryFetchVerifiedCheckpointTailFromLocal(
 
 	allHeaders, ok := d.loadLocalCheckpointHeaders(ctx, waypointStart, waypointEnd)
 	if !ok {
+		d.logger.Debug(
+			syncLogPrefix("checkpoint not fully available locally"),
+			"waypointStart", waypointStart,
+			"waypointEnd", waypointEnd,
+			"reason", "missing headers",
+		)
 		return nil, 0, false
 	}
 
 	if err := verifier(waypoint, allHeaders); err != nil {
+		d.logger.Debug(
+			syncLogPrefix("checkpoint not fully available locally"),
+			"waypointStart", waypointStart,
+			"waypointEnd", waypointEnd,
+			"reason", "header verification failed",
+			"err", err,
+		)
 		return nil, 0, false
 	}
 
@@ -508,6 +595,15 @@ func (d *BlockDownloader) tryFetchVerifiedCheckpointTailFromLocal(
 
 		body, err := d.localChainReader.GetBody(ctx, blockNum, header.Hash())
 		if err != nil || body == nil {
+			d.logger.Debug(
+				syncLogPrefix("checkpoint not fully available locally"),
+				"waypointStart", waypointStart,
+				"waypointEnd", waypointEnd,
+				"downloadStart", downloadStart,
+				"reason", "missing body",
+				"blockNum", blockNum,
+				"err", err,
+			)
 			return nil, 0, false
 		}
 
