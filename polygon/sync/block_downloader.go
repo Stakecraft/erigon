@@ -49,6 +49,8 @@ const (
 	tailBodyFetchMaxTimeout       = 45 * time.Second
 	tailBodyFetchPerHeaderTimeout = 200 * time.Millisecond
 	tailBodyFetchMaxRetries       = 2
+	tailBodyBatchPeerWaitRounds   = 10
+	tailBodyBatchPeerWaitInterval = 3 * time.Second
 
 	// conservative over-estimation: 1 MB block size x 1024 blocks per waypoint
 	blockDownloaderEstimatedRamPerWorker = estimate.EstimatedRamPerWorker(1 * datasize.GB)
@@ -550,10 +552,35 @@ func (d *BlockDownloader) logLocalTailBlockProbe(ctx context.Context, blockNum u
 		txByNum = len(bodyByNum.Transactions)
 	}
 
+	localHeaderHash := common.Hash{}
+	if header != nil {
+		localHeaderHash = header.Hash()
+	}
+	forkMismatch := header != nil && localHeaderHash != blockHash
+
+	if forkMismatch {
+		d.logger.Warn(
+			syncLogPrefix("local tail block probe"),
+			"block", blockNum,
+			"checkpointHash", blockHash,
+			"localHeaderHash", localHeaderHash,
+			"forkMismatch", true,
+			"headerFound", header != nil,
+			"headerErr", hErr,
+			"bodyByHashTxs", txByHash,
+			"bodyByHashErr", bhErr,
+			"bodyByNumTxs", txByNum,
+			"bodyByNumErr", bnErr,
+		)
+		return
+	}
+
 	d.logger.Info(
 		syncLogPrefix("local tail block probe"),
 		"block", blockNum,
-		"hash", blockHash,
+		"checkpointHash", blockHash,
+		"localHeaderHash", localHeaderHash,
+		"forkMismatch", false,
 		"headerFound", header != nil,
 		"headerErr", hErr,
 		"bodyByHashTxs", txByHash,
@@ -613,6 +640,7 @@ func (d *BlockDownloader) fetchTailBodiesPreferLocal(
 		d.logLocalTailBlockProbe(ctx, peerHeaders[0].Number.Uint64(), peerHeaders[0].Hash())
 	}
 
+	peerCandidates := d.listConnectedPeerCandidates(nil)
 	d.logger.Info(
 		syncLogPrefix("fetching waypoint tail bodies from peer"),
 		"localBodies", localBodies,
@@ -620,9 +648,11 @@ func (d *BlockDownloader) fetchTailBodiesPreferLocal(
 		"firstBlock", peerHeaders[0].Number.Uint64(),
 		"lastBlock", peerHeaders[len(peerHeaders)-1].Number.Uint64(),
 		"batchSize", waypointBodyFetchBatchSize,
+		"connectedPeers", len(peerCandidates),
 	)
 
-	totalSize, err := d.fetchPeerBodiesInBatches(ctx, peerHeaders, peerIndices, bodies, peerId, fetchOpts)
+	// Do not pin the header peer: it often disconnects during the long body fetch.
+	totalSize, err := d.fetchPeerBodiesInBatches(ctx, peerHeaders, peerIndices, bodies, nil, fetchOpts)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -648,44 +678,64 @@ func (d *BlockDownloader) fetchPeerBodiesInBatches(
 		batchHeaders := peerHeaders[offset:batchEnd]
 		batchIndices := peerIndices[offset:batchEnd]
 		batchOpts := tailBodyFetchOpts(len(batchHeaders))
-		peerCandidates := d.listConnectedPeerCandidates(primaryPeer)
 
 		var lastErr error
 		fetched := false
-		for _, peerId := range peerCandidates {
-			peerResp, err := d.p2pService.FetchBodies(ctx, batchHeaders, peerId, batchOpts...)
-			if err != nil {
-				lastErr = err
+		for waitRound := 0; waitRound < tailBodyBatchPeerWaitRounds && !fetched; waitRound++ {
+			if waitRound > 0 {
+				if err := common.Sleep(ctx, tailBodyBatchPeerWaitInterval); err != nil {
+					return 0, err
+				}
+			}
+
+			peerCandidates := d.listConnectedPeerCandidates(primaryPeer)
+			if len(peerCandidates) == 0 {
+				lastErr = p2p.ErrPeerNotFound
 				continue
 			}
-			if len(peerResp.Data) != len(batchHeaders) {
-				lastErr = fmt.Errorf("peer returned %d bodies, expected %d", len(peerResp.Data), len(batchHeaders))
-				continue
+
+			for _, peerId := range peerCandidates {
+				peerResp, err := d.p2pService.FetchBodies(ctx, batchHeaders, peerId, batchOpts...)
+				if err != nil {
+					lastErr = err
+					continue
+				}
+				if len(peerResp.Data) != len(batchHeaders) {
+					lastErr = fmt.Errorf("peer returned %d bodies, expected %d", len(peerResp.Data), len(batchHeaders))
+					continue
+				}
+
+				for j, idx := range batchIndices {
+					bodies[idx] = peerResp.Data[j]
+				}
+
+				totalSize += peerResp.TotalSize
+				d.logger.Info(
+					syncLogPrefix("fetched waypoint tail body batch"),
+					"from", batchHeaders[0].Number.Uint64(),
+					"to", batchHeaders[len(batchHeaders)-1].Number.Uint64(),
+					"blocks", len(batchHeaders),
+					"done", batchEnd,
+					"total", len(peerHeaders),
+					"peerId", peerId,
+				)
+
+				offset = batchEnd
+				fetched = true
+				break
 			}
-
-			for j, idx := range batchIndices {
-				bodies[idx] = peerResp.Data[j]
-			}
-
-			totalSize += peerResp.TotalSize
-			d.logger.Info(
-				syncLogPrefix("fetched waypoint tail body batch"),
-				"from", batchHeaders[0].Number.Uint64(),
-				"to", batchHeaders[len(batchHeaders)-1].Number.Uint64(),
-				"blocks", len(batchHeaders),
-				"done", batchEnd,
-				"total", len(peerHeaders),
-			)
-
-			offset = batchEnd
-			fetched = true
-			break
 		}
 
 		if !fetched {
 			if lastErr == nil {
 				lastErr = p2p.ErrPeerNotFound
 			}
+			d.logger.Warn(
+				syncLogPrefix("waypoint tail body batch failed after peer retries"),
+				"from", batchHeaders[0].Number.Uint64(),
+				"to", batchHeaders[len(batchHeaders)-1].Number.Uint64(),
+				"err", lastErr,
+			)
 			return 0, lastErr
 		}
 	}
