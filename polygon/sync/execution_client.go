@@ -169,6 +169,17 @@ func (e *executionClient) GetHeader(ctx context.Context, blockNum uint64) (*type
 	return header, nil
 }
 
+func (e *executionClient) GetBodyByNumber(ctx context.Context, blockNum uint64) (*types.Body, error) {
+	response, err := e.client.GetBody(ctx, &executionproto.GetSegmentRequest{
+		BlockNumber: &blockNum,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return decodeGetBodyResponse(response)
+}
+
 func (e *executionClient) GetBody(ctx context.Context, blockNum uint64, blockHash common.Hash) (*types.Body, error) {
 	response, err := e.client.GetBody(ctx, &executionproto.GetSegmentRequest{
 		BlockNumber: &blockNum,
@@ -178,6 +189,10 @@ func (e *executionClient) GetBody(ctx context.Context, blockNum uint64, blockHas
 		return nil, err
 	}
 
+	return decodeGetBodyResponse(response)
+}
+
+func decodeGetBodyResponse(response *executionproto.GetBodyResponse) (*types.Body, error) {
 	bodyRpc := response.GetBody()
 	if bodyRpc == nil {
 		return nil, nil

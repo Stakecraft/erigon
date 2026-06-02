@@ -57,6 +57,7 @@ const (
 type localChainReader interface {
 	GetHeader(ctx context.Context, blockNum uint64) (*types.Header, error)
 	GetBody(ctx context.Context, blockNum uint64, blockHash common.Hash) (*types.Body, error)
+	GetBodyByNumber(ctx context.Context, blockNum uint64) (*types.Body, error)
 }
 
 func NewBlockDownloader(
@@ -542,7 +543,11 @@ func (d *BlockDownloader) fetchTailBodiesPreferLocal(
 
 	for i, header := range tailHeaders {
 		if d.localChainReader != nil {
-			body, err := d.localChainReader.GetBody(ctx, header.Number.Uint64(), header.Hash())
+			blockNum := header.Number.Uint64()
+			body, err := d.localChainReader.GetBodyByNumber(ctx, blockNum)
+			if err == nil && body == nil {
+				body, err = d.localChainReader.GetBody(ctx, blockNum, header.Hash())
+			}
 			if err == nil && body != nil {
 				bodies[i] = body
 				localBodies++
@@ -701,7 +706,10 @@ func (d *BlockDownloader) tryFetchVerifiedCheckpointTailFromLocal(
 			continue
 		}
 
-		body, err := d.localChainReader.GetBody(ctx, blockNum, header.Hash())
+		body, err := d.localChainReader.GetBodyByNumber(ctx, blockNum)
+		if err == nil && body == nil {
+			body, err = d.localChainReader.GetBody(ctx, blockNum, header.Hash())
+		}
 		if err != nil || body == nil {
 			d.logger.Debug(
 				syncLogPrefix("checkpoint not fully available locally"),
